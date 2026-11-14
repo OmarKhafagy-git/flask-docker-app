@@ -17,7 +17,7 @@ resource "aws_iam_role" "github_deploy" {
       Condition = {
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-          "token.actions.githubusercontent.com:sub" = "repo:OmarKhafagy-git/flask-docker-app:ref:refs/heads/main"
+          "token.actions.githubusercontent.com:sub" = "repo:OmarKhafagy-git@280704207/flask-docker-app@1355805730:ref:refs/heads/main"
         }
       }
     }]
