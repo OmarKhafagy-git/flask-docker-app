@@ -1,21 +1,146 @@
-# Flask App - Dockerized 🐍🐳
+# Flask App on AWS: Terraform + GitHub Actions CI/CD
 
-A Python Flask web app, containerized following production best practices.
+A Python Flask app, containerized with Docker, running on AWS EC2.
+The infrastructure is written in **Terraform**, and every push to `main` is **tested, built and deployed automatically** by GitHub Actions.
 
-## What This Demonstrates
-As a DevOps exercise: packaging a developer's Python application into a
-production-ready container — proper base image, layer caching, and Compose.
+**No SSH. No open admin ports. No AWS keys stored in GitHub.**
 
-## Run It
-Visit http://localhost:5000
-Health check: http://localhost:5000/health
+---
 
-## DevOps Practices Used
-- Application Dockerfile (FROM python, WORKDIR, layered COPY for caching)
-- Slim base image for smaller size
-- .dockerignore to exclude unnecessary files
-- Health check endpoint (/health)
-- Docker Compose with build + restart policy
+## Architecture
 
-## Tech
-- Python 3.12, Flask, Docker, Docker Compose
+```mermaid
+flowchart LR
+    dev([git push to main]) --> test
+
+    subgraph gha [GitHub Actions]
+        test[test<br/>pytest] --> build[build-and-push<br/>tags :latest and :commit-sha]
+        build --> deploy[deploy<br/>OIDC login + SSM command]
+    end
+
+    build --> hub[(Docker Hub)]
+    deploy -- "AssumeRoleWithWebIdentity" --> role[IAM deploy role<br/>temporary credentials]
+    deploy -- "ssm:SendCommand" --> ssm[AWS Systems Manager]
+
+    subgraph aws [AWS eu-central-1, built with Terraform]
+        igw[Internet Gateway]
+        subgraph vpc [VPC 10.0.0.0/16]
+            subgraph subnet [Public subnet 10.0.1.0/24]
+                ec2[EC2 t3.micro<br/>Amazon Linux 2023<br/>Docker container]
+            end
+        end
+    end
+
+    ssm --> ec2
+    hub -- "docker pull" --> ec2
+    user([User]) -- "HTTP :80" --> igw --> ec2
+```
+
+---
+
+## How the pipeline works
+
+| Job | What it does |
+|---|---|
+| **test** | Installs dependencies and runs `pytest`. If a test fails, the pipeline stops and nothing is deployed. |
+| **build-and-push** | Builds the Docker image and pushes it to Docker Hub with two tags: `latest` and the **commit SHA**. |
+| **deploy** | Logs into AWS with **GitHub OIDC**, finds the server by its `Name` tag, and uses **SSM Run Command** to pull the new image, replace the container and run a **health check**. If the health check fails, the job fails. |
+
+Each job only starts if the one before it passed: `test → build-and-push → deploy`.
+
+---
+
+## Infrastructure (Terraform)
+
+All AWS resources are created from the [`terraform/`](terraform/) folder.
+
+| File | What it creates |
+|---|---|
+| `versions.tf` | Terraform and AWS provider versions, region |
+| `variables.tf` | `region` and `project` name |
+| `network.tf` | VPC, Internet Gateway, public subnet, route table |
+| `security.tf` | Security group: HTTP (80) in, all traffic out |
+| `ec2.tf` | Latest Amazon Linux 2023 AMI lookup and the EC2 instance |
+| `user_data.sh` | First-boot script: installs Docker and starts the app container |
+| `iam.tf` | EC2 role with `AmazonSSMManagedInstanceCore`, so SSM can manage the server |
+| `github_oidc.tf` | GitHub OIDC provider and a least-privilege deploy role for this repo's `main` branch |
+| `outputs.tf` | App URL and deploy role ARN |
+
+---
+
+## Design decisions
+
+- **OIDC instead of access keys.** GitHub proves its identity to AWS and receives credentials that expire after about an hour. Nothing long-lived is stored, so nothing can leak.
+- **SSM instead of SSH.** No port 22, no key pairs, no IP addresses in the pipeline. The server is found by its tag, so it still works after Terraform replaces it.
+- **Least privilege.** The deploy role can only send commands to this one instance and read their results. Only this repository's `main` branch can assume it.
+- **Immutable image tags.** Every deploy runs the exact image that passed the tests (`:commit-sha`), which also makes rollbacks easy.
+- **Health check as a gate.** The deploy job runs `curl` against `/health` on the server, so a broken release shows up as a red pipeline instead of a silent outage.
+- **Public subnet, no NAT Gateway or load balancer.** This keeps the cost near $0 for a learning project. A production setup would use private subnets, an Application Load Balancer and an Auto Scaling group for zero-downtime deploys.
+
+---
+
+## Run it yourself
+
+**Prerequisites:** an AWS account with the AWS CLI configured, Terraform 1.5 or newer, a Docker Hub account.
+
+1. **Create the infrastructure**
+   ```bash
+   cd terraform
+   terraform init
+   terraform apply
+   ```
+2. **Point the OIDC trust at your repo.** In `github_oidc.tf`, set the `sub` condition to your repository. GitHub's current format includes the owner and repo IDs:
+   `repo:<owner>@<owner-id>/<repo>@<repo-id>:ref:refs/heads/main`
+3. **Set your image name** in `user_data.sh` (`<dockerhub-user>/flask-app:latest`).
+4. **Add GitHub repository secrets** (Settings → Secrets and variables → Actions):
+   - `DOCKERHUB_USERNAME`
+   - `DOCKERHUB_TOKEN`
+   - `AWS_ROLE_ARN`: the value of `terraform output github_deploy_role_arn`
+5. **Push to `main`** and watch the Actions tab.
+6. **Open the app:**
+   ```bash
+   curl $(terraform output -raw app_url)
+   # {"status":"healthy"}
+   ```
+
+### Run locally
+
+```bash
+docker compose up --build
+# http://localhost:5000/health
+```
+
+Run the tests:
+
+```bash
+pip install -r requirements.txt
+pytest
+```
+
+---
+
+## Cost
+
+The VPC, subnet, route table, Internet Gateway, security group and IAM resources are free.
+The EC2 instance and its public IPv4 address are billed per hour while they run, so destroy everything when you're done:
+
+```bash
+terraform destroy
+```
+
+While the infrastructure is destroyed, the `deploy` job fails on purpose with a clear message: *"No running server found. Did you run terraform apply?"*
+
+---
+
+## Lessons learned
+
+- **Terraform removes the default egress rule** from security groups it creates. Without an explicit `egress` block, the server can't install Docker.
+- **GitHub's OIDC `sub` claim includes numeric owner and repo IDs.** The trust policy failed until I decoded the token's claims in a debug step and matched the exact value.
+- **The SSM agent registers only after the instance has a role.** Attaching the role to a running instance needed a reboot before the agent came online.
+- **Check the region first.** An empty AWS CLI result turned out to be a default region mismatch, not a missing resource.
+
+---
+
+## Tech stack
+
+Python · Flask · pytest · Docker · Docker Hub · Terraform · AWS (VPC, EC2, IAM, Systems Manager) · GitHub Actions
