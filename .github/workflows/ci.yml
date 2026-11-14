@@ -24,11 +24,11 @@ jobs:
       - name: Run tests
         run: pytest
 
-  # NEW: the deploy job (CD!) 🚀
-  deploy:
-    needs: test          # only runs if tests pass! 🔑
+  # Build the image and push it to Docker Hub
+  build-and-push:
+    needs: test                           # only runs if tests pass
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'   # only deploy from main
+    if: github.ref == 'refs/heads/main'   # never push from pull requests
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -44,4 +44,6 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/flask-app:latest
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/flask-app:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/flask-app:${{ github.sha }}
