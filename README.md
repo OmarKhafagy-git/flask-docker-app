@@ -119,6 +119,49 @@ pytest
 
 ---
 
+
+## Run on Kubernetes
+
+The [`k8s/`](k8s/) folder deploys the same Docker image to Kubernetes. It was tested on a local [kind](https://kind.sigs.k8s.io/) cluster.
+
+| File | What it creates |
+|---|---|
+| `namespace.yaml` | A dedicated `flask-app` namespace |
+| `configmap.yaml` | App settings (`APP_ENV`, `LOG_LEVEL`) |
+| `deployment.yaml` | 2 replicas pinned to a commit-SHA image, with readiness and liveness probes on `/health`, CPU and memory limits, and settings injected from the ConfigMap and Secret |
+| `service.yaml` | A ClusterIP Service in front of the pods |
+| `gateway.yaml` | A Gateway API `Gateway` and `HTTPRoute` that send `flask.local` to the Service |
+
+### Deploy
+
+```bash
+kind create cluster
+
+# Gateway API controller for kind
+VERSION="$(basename $(curl -s -L -o /dev/null -w '%{url_effective}' https://github.com/kubernetes-sigs/cloud-provider-kind/releases/latest))"
+docker run -d --name cloud-provider-kind --rm --network host -v /var/run/docker.sock:/var/run/docker.sock registry.k8s.io/cloud-provider-kind/cloud-controller-manager:${VERSION}
+
+kubectl apply -f k8s/namespace.yaml
+kubectl create secret generic flask-secret -n flask-app --from-literal=DB_PASSWORD=<your-password>
+kubectl apply -f k8s/
+```
+
+### Test
+
+```bash
+kubectl get gateway -n flask-app   # note the ADDRESS
+docker run --rm --network kind curlimages/curl -s -H "Host: flask.local" http://<ADDRESS>/health
+# {"status":"healthy"}
+```
+
+### Design notes
+
+- **The Secret is not in Git.** It's created with `kubectl create secret`, so the password never lands in the repository.
+- **Pinned image tag.** The Deployment uses the commit-SHA tag built by the CI pipeline, so the running version is always known. `kubectl rollout undo` returns to the previous version.
+- **Gateway API instead of Ingress.** The community ingress-nginx controller was retired in March 2026, and Gateway API is its official successor.
+- **Portable.** Only `gatewayClassName` is kind-specific. On a cloud cluster, point it at that cloud's Gateway controller.
+
+
 ## Cost
 
 The VPC, subnet, route table, Internet Gateway, security group and IAM resources are free.
@@ -143,4 +186,4 @@ While the infrastructure is destroyed, the `deploy` job fails on purpose with a 
 
 ## Tech stack
 
-Python · Flask · pytest · Docker · Docker Hub · Terraform · AWS (VPC, EC2, IAM, Systems Manager) · GitHub Actions
+Python · Flask · pytest · Docker · Docker Hub · Terraform · AWS (VPC, EC2, IAM, Systems Manager) · GitHub Actions · Kubernetes · Gateway API
