@@ -146,6 +146,44 @@ kubectl create secret generic flask-secret -n flask-app --from-literal=DB_PASSWO
 kubectl apply -f k8s/
 ```
 
+## Monitoring (Prometheus + Grafana)
+
+The Kubernetes deployment is monitored with the **kube-prometheus-stack** Helm chart (Prometheus, Grafana, Alertmanager, kube-state-metrics, node-exporter). The configuration lives in Git, so the whole setup can be rebuilt with two commands.
+
+| File | Purpose |
+|---|---|
+| `monitoring/values.yaml` | Helm values: Grafana in local time, 2-day metric retention |
+| `monitoring/alerts.yaml` | `PrometheusRule` with the app's alert rules |
+
+**Alert rules**
+
+| Alert | Fires when | Severity |
+|---|---|---|
+| `FlaskAppHighCPU` | A pod uses more than 80% of its CPU request for 5 minutes | warning |
+| `FlaskAppPodRestarting` | A pod restarts more than 2 times in 10 minutes (crash loop) | critical |
+
+**Install**
+
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+helm install monitoring prometheus-community/kube-prometheus-stack \
+  -n monitoring --create-namespace -f monitoring/values.yaml
+kubectl apply -f monitoring/alerts.yaml
+
+# Grafana: user "admin", password from the secret
+kubectl -n monitoring get secret monitoring-grafana -o jsonpath="{.data.admin-password}" | base64 -d; echo
+kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80   # http://localhost:3000
+```
+
+**Load test result:** under a `curl` load loop, CPU per pod rose about 13x and was split evenly across both replicas by the Service. At idle, the pods use about 1% of their 50m CPU request, which shows the requests could be right-sized.
+
+![Grafana dashboard for the flask-app namespace under load](docs/images/grafana-dashboard.png)
+
+![Alert firing in Grafana during the load test](docs/images/grafana-alert-firing.png)
+*For this screenshot the CPU threshold was temporarily lowered to 8% so the alert could be triggered on purpose.*
+
+
 ### Test
 
 ```bash
@@ -186,4 +224,4 @@ While the infrastructure is destroyed, the `deploy` job fails on purpose with a 
 
 ## Tech stack
 
-Python · Flask · pytest · Docker · Docker Hub · Terraform · AWS (VPC, EC2, IAM, Systems Manager) · GitHub Actions · Kubernetes · Gateway API
+Python · Flask · pytest · Docker · Docker Hub · Terraform · AWS (VPC, EC2, IAM, Systems Manager) · GitHub Actions · Kubernetes · Gateway API . Helm . Prometheus . Grafana

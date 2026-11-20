@@ -1,0 +1,7 @@
+# Settings for the kube-prometheus-stack Helm chart
+grafana:
+  defaultDashboardsTimezone: browser   # show times in local time, not UTC
+
+prometheus:
+  prometheusSpec:
+    retention: 2d                      # keep metrics 2 days (enough for a local lab)
